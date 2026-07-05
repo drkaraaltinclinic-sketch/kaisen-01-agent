@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KAISEN-01 · Ichimoku Screener</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0818;--surface:#141028;--border:#2a2050;--dim:#382a68;--muted:#4a3a88;
+  --soft:#7a6ab8;--bright:#b0a2e0;--white:#d8ccf8;--hi:#efe8ff;
+  --green:#27c97a;--red:#e05050;--amber:#e8a020;--blue:#4a90d9;--indigo:#818cf8;--purple:#a78bfa;
+}
+body{background:var(--bg);color:var(--white);font-family:'SF Mono','Fira Code','Courier New',monospace;font-size:11px;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+.titlebar{background:#070512;border-bottom:1px solid var(--border);padding:9px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.dots{display:flex;gap:6px}.dot{width:12px;height:12px;border-radius:50%}
+.agent-id{color:var(--soft);font-size:10px;letter-spacing:.1em;display:flex;align-items:center;gap:8px;flex:1;margin-left:6px}
+.badge{font-size:9px;padding:2px 8px;border-radius:3px;letter-spacing:.1em;font-weight:700}
+.b-live{background:rgba(39,201,122,.1);border:1px solid rgba(39,201,122,.25);color:var(--green)}
+.b-ichi{background:rgba(129,140,248,.12);border:1px solid rgba(129,140,248,.3);color:var(--indigo)}
+.b-warn{background:rgba(232,160,32,.1);border:1px solid rgba(232,160,32,.25);color:var(--amber)}
+#uptime{margin-left:auto;color:var(--muted);font-size:9px}
+.layout{display:grid;grid-template-columns:280px 1fr 260px;flex:1;overflow:hidden;min-height:0}
+.col{display:flex;flex-direction:column;overflow:hidden}
+.col-mid{border-left:1px solid var(--border);border-right:1px solid var(--border)}
+.phdr{background:#070512;border-bottom:1px solid var(--border);padding:6px 10px;display:flex;align-items:center;gap:6px;color:var(--soft);font-size:9px;letter-spacing:.12em;flex-shrink:0}
+.phdr i{font-size:13px}
+.phdr-pill{margin-left:auto;font-size:8px;padding:1px 6px;border-radius:2px;background:rgba(129,140,248,.12);color:var(--indigo);border:1px solid rgba(129,140,248,.25)}
+.scroll{overflow-y:auto;flex:1}
+.scroll::-webkit-scrollbar{width:3px}
+.scroll::-webkit-scrollbar-thumb{background:var(--dim);border-radius:2px}
+.coin-row{padding:8px 10px;border-bottom:1px solid #0d0a1e;cursor:pointer;transition:background .12s}
+.coin-row:hover{background:#171230}
+.coin-row.sel{background:#1d1740;border-left:2px solid var(--indigo)}
+.cr-top{display:flex;align-items:center;gap:7px}
+.cr-sym{color:var(--hi);font-size:12px;font-weight:800}
+.cr-price{color:var(--bright);font-size:10px;margin-left:auto}
+.cr-tfs{display:flex;gap:5px;margin-top:5px}
+.tf-chip{font-size:8px;padding:2px 7px;border-radius:3px;font-weight:700;letter-spacing:.05em}
+.tr-STRONG_BULL{background:rgba(39,201,122,.2);color:var(--green);border:1px solid rgba(39,201,122,.4)}
+.tr-BULL{background:rgba(39,201,122,.1);color:var(--green);border:1px solid rgba(39,201,122,.2)}
+.tr-NEUTRAL{background:rgba(74,58,136,.2);color:var(--soft);border:1px solid var(--dim)}
+.tr-BEAR{background:rgba(224,80,80,.1);color:var(--red);border:1px solid rgba(224,80,80,.2)}
+.tr-STRONG_BEAR{background:rgba(224,80,80,.2);color:var(--red);border:1px solid rgba(224,80,80,.4)}
+.pos-pill{font-size:8px;padding:1px 6px;border-radius:2px;margin-left:auto}
+.pos-ABOVE{color:var(--green)}.pos-BELOW{color:var(--red)}.pos-INSIDE{color:var(--amber)}
+.detail-wrap{padding:12px 14px;border-bottom:1px solid var(--border);flex-shrink:0}
+.dw-hdr{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.dw-sym{color:var(--hi);font-size:18px;font-weight:800}
+.dw-price{color:var(--bright);font-size:14px;font-weight:600;margin-left:auto}
+.ichi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.ig-cell{background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:6px 8px}
+.ig-label{color:var(--muted);font-size:8px;letter-spacing:.08em}
+.ig-val{color:var(--bright);font-size:10px;font-weight:700;margin-top:3px}
+.ev{display:flex;gap:7px;align-items:flex-start;padding:4px 10px;border-bottom:1px solid #0b0818;animation:slide .2s ease}
+@keyframes slide{from{opacity:0;transform:translateX(-5px)}to{opacity:1;transform:none}}
+.ev-ts{color:var(--muted);font-size:8px;flex-shrink:0;margin-top:1px;min-width:50px}
+.ev-tag{font-size:8px;padding:1px 5px;border-radius:2px;flex-shrink:0;letter-spacing:.07em;font-weight:700;min-width:56px;text-align:center}
+.ev-body{color:var(--bright);font-size:9px;line-height:1.5;flex:1;word-break:break-word}
+.ev-body b{color:var(--hi)}
+.t-sig{background:rgba(129,140,248,.15);color:var(--indigo);border:1px solid rgba(129,140,248,.3)}
+.t-scan{background:rgba(167,139,250,.1);color:var(--purple);border:1px solid rgba(167,139,250,.2)}
+.t-hook{background:rgba(74,144,217,.12);color:var(--blue);border:1px solid rgba(74,144,217,.25)}
+.t-sys{background:rgba(74,58,136,.3);color:var(--soft);border:1px solid var(--dim)}
+.t-bull{background:rgba(39,201,122,.12);color:var(--green);border:1px solid rgba(39,201,122,.25)}
+.t-bear{background:rgba(224,80,80,.12);color:var(--red);border:1px solid rgba(224,80,80,.25)}
+.sig-card{margin:7px;border:1px solid var(--border);border-radius:6px;padding:8px 10px}
+.sc-top{display:flex;align-items:center;gap:6px}
+.sc-type{font-size:9px;font-weight:800;color:var(--hi)}
+.sc-urg{font-size:7px;padding:1px 5px;border-radius:2px;margin-left:auto;font-weight:700}
+.urg-HIGH{background:rgba(224,80,80,.15);color:var(--red);border:1px solid rgba(224,80,80,.3)}
+.urg-MEDIUM{background:rgba(232,160,32,.12);color:var(--amber);border:1px solid rgba(232,160,32,.25)}
+.urg-LOW{background:rgba(74,144,217,.1);color:var(--blue);border:1px solid rgba(74,144,217,.2)}
+.sc-body{font-size:8px;color:var(--soft);margin-top:4px;line-height:1.6}
+.scan-btn{margin:10px;padding:9px;border:1px solid rgba(129,140,248,.4);background:rgba(129,140,248,.1);color:var(--indigo);border-radius:5px;font-family:inherit;font-size:10px;font-weight:700;letter-spacing:.08em;cursor:pointer;transition:all .15s}
+.scan-btn:hover{background:rgba(129,140,248,.2)}
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--border);flex-shrink:0}
+.stat-item{padding:7px 10px;border-right:1px solid var(--border);text-align:center}
+.stat-item:last-child{border-right:none}
+.stat-num{color:var(--hi);font-size:14px;font-weight:700}
+.stat-lbl{color:var(--muted);font-size:8px;margin-top:2px}
+.bottombar{background:#070512;border-top:1px solid var(--border);padding:6px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}
+.bb{font-size:9px;color:var(--muted);display:flex;align-items:center;gap:5px}
+.bb b{color:var(--soft)}.bb-sep{color:var(--dim)}
+.pulse{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.empty{padding:20px;text-align:center;color:var(--muted);font-size:10px;line-height:1.8}
+</style>
+</head>
+<body>
+
+<div class="titlebar">
+  <div class="dots"><div class="dot" style="background:#ff5f57"></div><div class="dot" style="background:#febc2e"></div><div class="dot" style="background:#28c840"></div></div>
+  <div class="agent-id">
+    <span style="color:var(--soft)">agent://</span><span style="color:var(--indigo)">KAISEN-01</span>
+    <span style="color:var(--dim)">—</span>
+    <span style="color:var(--muted)">Ichimoku Screener · venue: Hyperliquid · 1H + 4H</span>
+    <span class="badge b-live" id="main-badge">CONNECTING</span>
+    <span class="badge b-ichi">改善 KINKO HYO</span>
+  </div>
+  <span id="uptime">UP: 00:00:00</span>
+</div>
+
+<div class="layout">
+  <div class="col">
+    <div class="phdr"><i class="ti ti-list"></i> SCREENED ASSETS <span class="phdr-pill" id="coin-count">0</span></div>
+    <div class="scroll" id="coin-list"><div class="empty"><span class="pulse" style="margin-right:6px"></span>First Hyperliquid scan running...</div></div>
+  </div>
+
+  <div class="col col-mid">
+    <div class="detail-wrap" id="detail">
+      <div style="color:var(--muted);font-size:10px;padding:6px 0"><span class="pulse" style="margin-right:6px"></span>Select an asset to view its Ichimoku state</div>
+    </div>
+    <div class="phdr"><i class="ti ti-satellite"></i> SCREENER EVENT BUS <span class="phdr-pill" id="ev-count">0 events</span></div>
+    <div class="scroll" id="event-stream"><div class="empty">Connecting...</div></div>
+    <div class="stats-row">
+      <div class="stat-item"><div class="stat-num" id="st-signals">0</div><div class="stat-lbl">signals</div></div>
+      <div class="stat-item"><div class="stat-num" id="st-scans">0</div><div class="stat-lbl">scans</div></div>
+      <div class="stat-item"><div class="stat-num" id="st-hooks">0</div><div class="stat-lbl">tv webhooks</div></div>
+      <div class="stat-item"><div class="stat-num" id="st-gecko" style="color:var(--red)">OFF</div><div class="stat-lbl">network link</div></div>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="phdr"><i class="ti ti-crown"></i> SUPREME LEADER FEED</div>
+    <div class="scroll" id="sig-list"><div class="empty">Actionable setups appear here as standardized payloads</div></div>
+    <button class="scan-btn" onclick="scanNow()"><i class="ti ti-radar-2"></i> SCAN NOW</button>
+  </div>
+</div>
+
+<div class="bottombar">
+  <div class="bb"><span class="pulse" id="bb-pulse"></span> <b id="bb-status">CONNECTING</b></div>
+  <span class="bb-sep">|</span>
+  <div class="bb">VENUE <b>Hyperliquid</b></div>
+  <span class="bb-sep">|</span>
+  <div class="bb">GECKO <b id="bb-gecko" style="color:var(--red)">OFFLINE</b></div>
+  <span class="bb-sep">|</span>
+  <div class="bb">SIGNALS <b id="bb-signals">0</b></div>
+  <span class="bb-sep">|</span>
+  <div class="bb" style="margin-left:auto">KAISEN-01 v1.0.0 · Railway</div>
+</div>
+
+<script>
+let ws=null, analysis={}, signals=[], selected=null;
+let evTotal=0, sigTotal=0, scanTotal=0, hookTotal=0, uptimeSec=0;
+let TFS=['1h','4h'];
+
+function ts(){return new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+function fmt(n){if(!n&&n!==0)return '—';if(n>=1e3)return '$'+Number(n.toFixed(2)).toLocaleString();if(n<1&&n>0)return '$'+n.toFixed(6);return '$'+Number(n).toFixed(2);}
+
+function pushEvent(type,tagClass,body){
+  const s=document.getElementById('event-stream');
+  if(s.children.length===1&&s.children[0].className==='empty')s.innerHTML='';
+  const d=document.createElement('div');d.className='ev';
+  d.innerHTML=`<span class="ev-ts">${ts()}</span><span class="ev-tag ${tagClass}">${type}</span><span class="ev-body">${body}</span>`;
+  s.insertBefore(d,s.firstChild);
+  if(s.children.length>80)s.removeChild(s.lastChild);
+  evTotal++;document.getElementById('ev-count').textContent=evTotal+' events';
+}
+
+function coins(){
+  const set=new Set(Object.keys(analysis).map(k=>k.split(':')[0]));
+  return [...set];
+}
+
+function renderCoins(){
+  const el=document.getElementById('coin-list');
+  const list=coins();
+  if(!list.length)return;
+  el.innerHTML='';
+  list.forEach(c=>{
+    const a1=analysis[c+':'+TFS[0]],a4=analysis[c+':'+TFS[1]];
+    const ref=a4||a1;if(!ref)return;
+    const row=document.createElement('div');
+    row.className='coin-row'+(selected===c?' sel':'');
+    row.onclick=()=>{selected=c;renderCoins();renderDetail(c);};
+    row.innerHTML=`
+      <div class="cr-top"><span class="cr-sym">${c}</span><span class="pos-pill pos-${ref.pricePos}">${ref.pricePos} KUMO</span><span class="cr-price">${fmt(ref.price)}</span></div>
+      <div class="cr-tfs">
+        ${a1?`<span class="tf-chip tr-${a1.trend}">1H ${a1.trend.replace('_',' ')}</span>`:''}
+        ${a4?`<span class="tf-chip tr-${a4.trend}">4H ${a4.trend.replace('_',' ')}</span>`:''}
+      </div>`;
+    el.appendChild(row);
+  });
+  document.getElementById('coin-count').textContent=list.length+' assets';
+}
+
+function renderDetail(c){
+  const el=document.getElementById('detail');
+  const a1=analysis[c+':'+TFS[0]],a4=analysis[c+':'+TFS[1]];
+  const ref=a4||a1;if(!ref)return;
+  function tfBlock(a){
+    if(!a)return '';
+    return `
+      <div style="margin-top:10px">
+        <div style="font-size:9px;color:var(--indigo);letter-spacing:.12em;margin-bottom:6px">${a.tf.toUpperCase()} — <span class="tf-chip tr-${a.trend}" style="font-size:8px">${a.trend.replace('_',' ')} (${a.trendScore})</span></div>
+        <div class="ichi-grid">
+          <div class="ig-cell"><div class="ig-label">TENKAN (9)</div><div class="ig-val">${fmt(a.tenkan)}</div></div>
+          <div class="ig-cell"><div class="ig-label">KIJUN (26)</div><div class="ig-val">${fmt(a.kijun)}</div></div>
+          <div class="ig-cell"><div class="ig-label">KUMO TOP</div><div class="ig-val">${fmt(a.cloudTop)}</div></div>
+          <div class="ig-cell"><div class="ig-label">KUMO BOTTOM</div><div class="ig-val">${fmt(a.cloudBot)}</div></div>
+          <div class="ig-cell"><div class="ig-label">PRICE VS KUMO</div><div class="ig-val pos-${a.pricePos}">${a.pricePos}</div></div>
+          <div class="ig-cell"><div class="ig-label">CLOUD</div><div class="ig-val" style="color:${a.cloudBullish?'var(--green)':'var(--red)'}">${a.cloudBullish?'BULLISH':'BEARISH'}</div></div>
+          <div class="ig-cell"><div class="ig-label">FUTURE CLOUD</div><div class="ig-val" style="color:${a.futureBullish?'var(--green)':'var(--red)'}">${a.futureBullish?'BULLISH':'BEARISH'}</div></div>
+          <div class="ig-cell"><div class="ig-label">CHIKOU</div><div class="ig-val" style="color:${a.chikou==='BULL'?'var(--green)':a.chikou==='BEAR'?'var(--red)':'var(--amber)'}">${a.chikou}</div></div>
+        </div>
+      </div>`;
+  }
+  el.innerHTML=`
+    <div class="dw-hdr"><span class="dw-sym">${c}</span><span class="pos-pill pos-${ref.pricePos}" style="font-size:9px">${ref.pricePos} KUMO</span><span class="dw-price">${fmt(ref.price)}</span></div>
+    ${tfBlock(a1)}${tfBlock(a4)}`;
+}
+
+function addSignalCard(s){
+  const el=document.getElementById('sig-list');
+  if(el.children.length===1&&el.children[0].className==='empty')el.innerHTML='';
+  const d=document.createElement('div');d.className='sig-card';
+  const dirColor=s.direction==='LONG'?'var(--green)':s.direction==='SHORT'?'var(--red)':'var(--soft)';
+  d.innerHTML=`
+    <div class="sc-top"><span class="sc-type" style="color:${dirColor}">${s.signal}</span><span class="sc-urg urg-${s.urgency}">${s.urgency}</span></div>
+    <div class="sc-body">
+      <b style="color:var(--hi)">${s.asset}</b> · ${s.timeframe} · ${s.direction}<br>
+      price ${fmt(s.metrics?.current_price)} · kijun ${fmt(s.metrics?.kijun_support)}<br>
+      trend ${s.metrics?.trend||'—'} (${s.metrics?.trend_score??'—'}) · ${new Date(s.generated).toLocaleTimeString('en-US',{hour12:false})}
+    </div>`;
+  el.insertBefore(d,el.firstChild);
+  if(el.children.length>25)el.removeChild(el.lastChild);
+}
+
+function scanNow(){if(ws?.readyState===1)ws.send(JSON.stringify({type:'SCAN'}));}
+
+function setGecko(on){
+  document.getElementById('bb-gecko').textContent=on?'LIVE':'OFFLINE';
+  document.getElementById('bb-gecko').style.color=on?'var(--green)':'var(--red)';
+  document.getElementById('st-gecko').textContent=on?'ON':'OFF';
+  document.getElementById('st-gecko').style.color=on?'var(--green)':'var(--red)';
+}
+
+function handleEvent(ev){
+  const d=ev.data;
+  switch(ev.topic){
+    case 'keisen.handshake':
+      setStatus('LIVE','var(--green)');
+      setGecko(d.geckoConnected);
+      if(d.timeframes)TFS=d.timeframes;
+      if(d.analysis){analysis=d.analysis;renderCoins();const c=coins();if(c.length&&!selected){selected=c[0];renderDetail(c[0]);}}
+      if(d.signals){signals=d.signals;signals.slice().reverse().forEach(addSignalCard);}
+      if(d.stats){sigTotal=d.stats.signals||0;scanTotal=d.stats.scans||0;hookTotal=d.stats.webhooks||0;
+        document.getElementById('st-signals').textContent=sigTotal;
+        document.getElementById('bb-signals').textContent=sigTotal;
+        document.getElementById('st-scans').textContent=scanTotal;
+        document.getElementById('st-hooks').textContent=hookTotal;}
+      pushEvent('SYS','t-sys','Connected to <b>KAISEN-01</b> screener');
+      break;
+    case 'keisen.analysis':
+      analysis[d.coin+':'+d.tf]=d;
+      renderCoins();
+      if(selected===d.coin)renderDetail(d.coin);
+      if(d.setups?.length)d.setups.forEach(s=>pushEvent(s.dir==='LONG'?'BULL':'BEAR',s.dir==='LONG'?'t-bull':'t-bear',`<b>${d.coin}</b> ${d.tf.toUpperCase()} — ${s.type}`));
+      break;
+    case 'keisen.signal':
+      sigTotal++;
+      document.getElementById('st-signals').textContent=sigTotal;
+      document.getElementById('bb-signals').textContent=sigTotal;
+      addSignalCard(d);
+      pushEvent('SIGNAL','t-sig',`[${d.urgency}] <b>${d.asset}</b> ${d.timeframe} ${d.signal} → ${d.direction} @ ${fmt(d.metrics?.current_price)}`);
+      break;
+    case 'keisen.webhook':
+      hookTotal++;
+      document.getElementById('st-hooks').textContent=hookTotal;
+      addSignalCard(d);
+      pushEvent('WEBHOOK','t-hook',`TradingView: <b>${d.asset}</b> ${d.signal} ${d.direction}`);
+      break;
+    case 'keisen.scan.start':
+      pushEvent('SCAN','t-scan',`Scan #${d.scan} started — ${d.assets} assets × ${d.timeframes?.length||2} timeframes`);
+      break;
+    case 'keisen.scan.complete':
+      scanTotal=d.scan;
+      document.getElementById('st-scans').textContent=scanTotal;
+      pushEvent('SCAN','t-scan',`Scan #${d.scan} complete — <b>${d.analyzed}</b> analyzed · ${d.failed} failed · ${d.signalsTotal} total signals`);
+      break;
+    case 'keisen.gecko.connected':setGecko(true);pushEvent('SYS','t-sys','GECKO-01 network link established');break;
+    case 'keisen.gecko.disconnected':setGecko(false);pushEvent('SYS','t-sys','GECKO-01 link lost — reconnecting...');break;
+  }
+}
+
+function setStatus(txt,col){
+  const b=document.getElementById('main-badge');
+  b.textContent=txt;b.className='badge '+(txt==='LIVE'?'b-live':'b-warn');
+  document.getElementById('bb-status').textContent=txt;
+  document.getElementById('bb-pulse').style.background=col;
+}
+
+function connect(){
+  const proto=location.protocol==='https:'?'wss':'ws';
+  ws=new WebSocket(`${proto}://${location.host}/?agent=DASHBOARD`);
+  ws.onopen=()=>setStatus('LIVE','var(--green)');
+  ws.onmessage=e=>{try{handleEvent(JSON.parse(e.data));}catch(err){}};
+  ws.onclose=()=>{setStatus('RECONNECTING','var(--amber)');setTimeout(connect,4000);};
+  ws.onerror=()=>setStatus('ERROR','var(--red)');
+  setInterval(()=>{if(ws?.readyState===1)ws.send(JSON.stringify({type:'PING'}));},20000);
+}
+
+setInterval(()=>{
+  uptimeSec++;
+  const h=Math.floor(uptimeSec/3600).toString().padStart(2,'0');
+  const m=Math.floor((uptimeSec%3600)/60).toString().padStart(2,'0');
+  const s=(uptimeSec%60).toString().padStart(2,'0');
+  document.getElementById('uptime').textContent=`UP: ${h}:${m}:${s}`;
+},1000);
+
+connect();
+</script>
+</body>
+</html>
