@@ -18,7 +18,11 @@ const path = require('path');
 const PORT = process.env.PORT || 3005;
 const GECKO_URL = process.env.GECKO_URL || 'wss://gecko-01-agent-production.up.railway.app/?agent=KAISEN-01';
 const HL_API = process.env.HL_API || 'https://api.hyperliquid.xyz/info';
-const ASSETS = (process.env.ASSETS || 'BTC,ETH,SOL,HYPE,XRP,ADA,LINK,AVAX,POPCAT').split(',').map(s => s.trim());
+const ASSETS_RAW = (process.env.ASSETS || 'BTC,ETH,SOL,HYPE,XRP,ADA,LINK,AVAX,POPCAT').trim();
+const ALL_MODE = ASSETS_RAW.toUpperCase() === 'ALL';
+let ASSETS = ALL_MODE ? [] : ASSETS_RAW.split(',').map(s => s.trim());
+const MAX_ASSETS = parseInt(process.env.MAX_ASSETS || '50');            // cap when ASSETS=ALL
+const SCAN_PACING_MS = parseInt(process.env.SCAN_PACING_MS || (ALL_MODE ? '1100' : '250'));
 const TIMEFRAMES = (process.env.TIMEFRAMES || '1h,4h').split(',').map(s => s.trim());
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '300000'); // 5 min
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';                     // optional shared secret
@@ -159,8 +163,34 @@ async function fetchCandles(coin, interval) {
   return raw.map(k => ({ t: k.t, o: +k.o, h: +k.h, l: +k.l, c: +k.c, v: +k.v }));
 }
 
+// ─── Hyperliquid Universe Discovery (ASSETS=ALL mode) ────────────────────────
+async function fetchUniverse() {
+  const res = await fetch(HL_API, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'metaAndAssetCtxs' }), timeout: 15000,
+  });
+  if (!res.ok) throw new Error(`Hyperliquid universe ${res.status}`);
+  const [meta, ctxs] = await res.json();
+  const ranked = meta.universe
+    .map((u, i) => ({ name: u.name, vol: parseFloat(ctxs[i]?.dayNtlVlm || 0), delisted: !!u.isDelisted }))
+    .filter(u => !u.delisted && u.vol > 0)
+    .sort((a, b) => b.vol - a.vol)
+    .slice(0, MAX_ASSETS)
+    .map(u => u.name);
+  return ranked;
+}
+
 async function scanAll() {
   state.scanCount++;
+  if (ALL_MODE) {
+    try {
+      ASSETS = await fetchUniverse();
+      emit('SYS', 'keisen.universe', { mode: 'ALL', topByVolume: ASSETS.length, sample: ASSETS.slice(0, 10) });
+    } catch (err) {
+      emit('SYS', 'keisen.universe', { mode: 'ALL', error: err.message, usingPrevious: ASSETS.length });
+      if (!ASSETS.length) return;
+    }
+  }
   emit('SYS', 'keisen.scan.start', { scan: state.scanCount, assets: ASSETS.length, timeframes: TIMEFRAMES });
   let ok = 0, failed = 0;
   for (const coin of ASSETS) {
@@ -171,7 +201,7 @@ async function scanAll() {
         state.candles[`${coin}:${tf}`] = candles;
         const a = screen(coin, tf, candles);
         if (a) { ok++; emit('SCAN', 'keisen.analysis', a); fireSignals(a); }
-        await new Promise(r => setTimeout(r, 250));
+        await new Promise(r => setTimeout(r, SCAN_PACING_MS));
       } catch (err) {
         failed++;
         state.errors.push({ time: new Date().toISOString(), coin, tf, message: err.message });
@@ -291,7 +321,7 @@ server.listen(PORT, () => {
   console.log('╚════════════════════════════════════════════════╝');
   console.log('');
   console.log(`  HTTP    →  http://localhost:${PORT}`);
-  console.log(`  Assets  →  ${ASSETS.join(', ')}`);
+  console.log(ALL_MODE ? `  Assets  →  ALL (top ${MAX_ASSETS} by 24h volume, auto-discovered)` : `  Assets  →  ${ASSETS.join(', ')}`);
   console.log(`  Scan    →  every ${SCAN_INTERVAL_MS / 60000} min`);
   console.log(`  Webhook →  POST /webhook (TradingView)`);
   console.log('');
