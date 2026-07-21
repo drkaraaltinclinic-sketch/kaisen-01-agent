@@ -1,12 +1,10 @@
 /**
- * KAIZEN-01 — 改善 The Continuous Improvement Engine
- * Listens to everything, remembers across days, and generates a prioritized
- * improvement backlog for the whole network:
- *   observe (bus telemetry + trend memory)
- *   → propose (Claude generates tasks: target, remedy, rationale, impact)
- *   → deliver (tasks broadcast on the bus + tracked on the board)
- *   → measure (after a task is deployed, compare before/after metrics)
- * CONSTITUTION: Kaizen PROPOSES, humans DISPOSE — it never deploys code itself.
+ * KAISEN-01 — Ichimoku Kinko Hyo Screener Agent
+ * Data: Hyperliquid Info API (native candles from the execution venue)
+ * Optional: TradingView webhook receiver (POST /webhook)
+ * Screens multi-timeframe (1H momentum + 4H structure) for:
+ *   TK Cross · Kumo Breakout · Edge-to-Edge · The Trinity
+ * Emits standardized payloads for SUPREME LEADER and reports to GECKO-01.
  */
 
 const express = require('express');
@@ -16,241 +14,320 @@ const http = require('http');
 const cors = require('cors');
 const path = require('path');
 
-const PORT = process.env.PORT || 3021;
-const GECKO_URL = process.env.GECKO_URL || 'wss://gecko-01-agent-production.up.railway.app/?agent=KAIZEN-01';
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
-const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
-const KAIZEN_INTERVAL_MS = parseInt(process.env.KAIZEN_INTERVAL_MS || '28800000');  // 8h
-const FIRST_CYCLE_DELAY_MS = parseInt(process.env.FIRST_CYCLE_DELAY_MS || '3600000'); // 1h listening first
-const SNAPSHOT_MS = parseInt(process.env.SNAPSHOT_MS || '3600000');                 // hourly trend snapshots
+// ─── Config ──────────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3005;
+const GECKO_URL = process.env.GECKO_URL || 'wss://gecko-01-agent-production.up.railway.app/?agent=KAISEN-01';
+const HL_API = process.env.HL_API || 'https://api.hyperliquid.xyz/info';
+const ASSETS_RAW = (process.env.ASSETS || 'BTC,ETH,SOL,HYPE,XRP,ADA,LINK,AVAX,POPCAT').trim();
+const ALL_MODE = ASSETS_RAW.toUpperCase() === 'ALL';
+let ASSETS = ALL_MODE ? [] : ASSETS_RAW.split(',').map(s => s.trim());
+const MAX_ASSETS = parseInt(process.env.MAX_ASSETS || '50');            // cap when ASSETS=ALL
+const SCAN_PACING_MS = parseInt(process.env.SCAN_PACING_MS || (ALL_MODE ? '1100' : '250'));
+const TIMEFRAMES = (process.env.TIMEFRAMES || '1h,4h').split(',').map(s => s.trim());
+const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '300000'); // 5 min
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || '';                     // optional shared secret
 
+// ─── State ───────────────────────────────────────────────────────────────────
 const state = {
-  startTime: Date.now(), geckoConnected: false,
-  live: {},            // agentId → { lastSeen, stats, alertsInWindow, eventsInWindow }
-  history: [],         // hourly snapshots: { t, perAgent: {id: {alerts, events, stats}} } (7 days)
-  auditEchoes: [],     // grades/findings heard from AUDITOR on the bus
-  vizierEchoes: [],    // verdicts heard from VIZIER
-  tasks: [],           // the backlog: {id, target, category, title, rationale, remedy, expectedImpact, priority, effort, status, createdAt, ...}
-  taskSeq: 0, cycleCount: 0, alertCount: 0,
-  running: false, errors: [], lastError: null,
+  startTime: Date.now(),
+  geckoConnected: false,
+  scanCount: 0,
+  signalCount: 0,
+  webhookCount: 0,
+  candles: {},
+  analysis: {},
+  signals: [],
+  errors: [],
 };
 
-function reportError(msg){ if(state.lastError===msg)return; state.lastError=msg;
-  state.errors.push({time:new Date().toISOString(),message:msg}); state.errors=state.errors.slice(-10);
-  emit('ERROR','kaizen.error',{message:msg},'HIGH'); }
+// ─── Ichimoku Math ───────────────────────────────────────────────────────────
+const hh = (c, n, end) => Math.max(...c.slice(end - n + 1, end + 1).map(x => x.h));
+const ll = (c, n, end) => Math.min(...c.slice(end - n + 1, end + 1).map(x => x.l));
 
-// Robust JSON extraction — LLMs sometimes append prose after the closing brace
-function extractJson(text) {
-  const start = text.indexOf('{');
-  if (start < 0) throw new Error('no JSON object in response');
-  let depth = 0, inStr = false, esc = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (esc) { esc = false; continue; }
-    if (ch === '\\') { esc = true; continue; }
-    if (ch === '"') inStr = !inStr;
-    if (inStr) continue;
-    if (ch === '{') depth++;
-    if (ch === '}') { depth--; if (depth === 0) return JSON.parse(text.slice(start, i + 1)); }
-  }
-  throw new Error('unbalanced JSON in response');
+function ichimokuAt(candles, i) {
+  if (i < 52 + 26) return null;
+  const tenkan = (hh(candles, 9, i) + ll(candles, 9, i)) / 2;
+  const kijun  = (hh(candles, 26, i) + ll(candles, 26, i)) / 2;
+  const j = i - 26; // cloud at price index i was projected from i-26
+  const spanA = ((hh(candles, 9, j) + ll(candles, 9, j)) / 2 + (hh(candles, 26, j) + ll(candles, 26, j)) / 2) / 2;
+  const spanB = (hh(candles, 52, j) + ll(candles, 52, j)) / 2;
+  const fSpanA = (tenkan + kijun) / 2;                       // future cloud
+  const fSpanB = (hh(candles, 52, i) + ll(candles, 52, i)) / 2;
+  const close = candles[i].c;
+  const cloudTop = Math.max(spanA, spanB), cloudBot = Math.min(spanA, spanB);
+  return {
+    close, tenkan, kijun, spanA, spanB, fSpanA, fSpanB, cloudTop, cloudBot,
+    pricePos: close > cloudTop ? 'ABOVE' : close < cloudBot ? 'BELOW' : 'INSIDE',
+    cloudBullish: spanA > spanB,
+    futureBullish: fSpanA > fSpanB,
+    chikouClear: candles[i - 26] ? (close > candles[i - 26].h ? 'BULL' : close < candles[i - 26].l ? 'BEAR' : 'BLOCKED') : 'UNKNOWN',
+  };
 }
 
-// ─── Observe: bus ingestion with trend memory ─────────────────────────────────
-function ingest(msg) {
-  let id = msg.agentId, stats = null;
-  if (msg.topic === 'gecko.agent.status' && msg.data?.agentId) { id = msg.data.agentId; stats = msg.data.stats; }
-  else if (msg.type === 'STATUS') stats = msg.stats;
-  if (!id || id === 'KAIZEN-01') return;
-  const a = state.live[id] || { alertsInWindow: 0, eventsInWindow: 0 };
-  a.lastSeen = Date.now();
-  a.eventsInWindow++;
-  if (stats) a.stats = stats;
-  if (msg.type === 'ALERT' || /alert/i.test(msg.topic || '')) a.alertsInWindow++;
-  state.live[id] = a;
-  // Learn from the council: remember AUDITOR grades and VIZIER verdicts
-  if (msg.topic === 'audit.report' && msg.data) {
-    state.auditEchoes.unshift({ t: new Date().toISOString(), grade: msg.data.grade, findings: (msg.data.findings || []).length });
-    state.auditEchoes = state.auditEchoes.slice(0, 20);
+function screen(coin, tf, candles) {
+  const i = candles.length - 1;
+  const now = ichimokuAt(candles, i);
+  const prev = ichimokuAt(candles, i - 1);
+  if (!now || !prev) return null;
+
+  const setups = [];
+
+  // 1. TK Cross
+  const tkBull = now.tenkan > now.kijun && prev.tenkan <= prev.kijun;
+  const tkBear = now.tenkan < now.kijun && prev.tenkan >= prev.kijun;
+  if (tkBull) setups.push({ type: 'TK_CROSS_BULL', dir: 'LONG', weight: now.pricePos === 'ABOVE' ? 30 : now.pricePos === 'INSIDE' ? 20 : 10 });
+  if (tkBear) setups.push({ type: 'TK_CROSS_BEAR', dir: 'SHORT', weight: now.pricePos === 'BELOW' ? 30 : now.pricePos === 'INSIDE' ? 20 : 10 });
+
+  // 2. Kumo Breakout
+  if (now.pricePos === 'ABOVE' && prev.pricePos !== 'ABOVE') setups.push({ type: 'KUMO_BREAKOUT_BULL', dir: 'LONG', weight: 35 });
+  if (now.pricePos === 'BELOW' && prev.pricePos !== 'BELOW') setups.push({ type: 'KUMO_BREAKOUT_BEAR', dir: 'SHORT', weight: 35 });
+
+  // 3. Edge-to-Edge
+  if (now.pricePos === 'INSIDE' && prev.pricePos !== 'INSIDE') {
+    const dir = prev.pricePos === 'BELOW' ? 'LONG' : 'SHORT';
+    setups.push({ type: 'EDGE_TO_EDGE', dir, weight: 15, target: dir === 'LONG' ? now.cloudTop : now.cloudBot });
   }
-  if (msg.topic === 'vizier.memo' && msg.data) {
-    state.vizierEchoes.unshift({ t: new Date().toISOString(), asset: msg.data.asset, direction: msg.data.direction,
-      verdict: msg.data.verdict, reason: (msg.data.reason || '').slice(0, 300), thesisTag: msg.data.thesisTag || null });
-    state.vizierEchoes = state.vizierEchoes.slice(0, 30);
+
+  // 4. The Trinity
+  if (now.pricePos === 'ABOVE' && tkBull && now.tenkan > now.cloudTop && now.chikouClear === 'BULL') {
+    setups.push({ type: 'TRINITY_BULL', dir: 'LONG', weight: 50 });
   }
+  if (now.pricePos === 'BELOW' && tkBear && now.tenkan < now.cloudBot && now.chikouClear === 'BEAR') {
+    setups.push({ type: 'TRINITY_BEAR', dir: 'SHORT', weight: 50 });
+  }
+
+  // Continuous trend context
+  let trendScore = 0;
+  trendScore += now.pricePos === 'ABOVE' ? 20 : now.pricePos === 'BELOW' ? -20 : 0;
+  trendScore += now.tenkan > now.kijun ? 10 : -10;
+  trendScore += now.cloudBullish ? 8 : -8;
+  trendScore += now.futureBullish ? 7 : -7;
+  trendScore += now.chikouClear === 'BULL' ? 10 : now.chikouClear === 'BEAR' ? -10 : 0;
+
+  const analysis = {
+    coin, tf,
+    price: now.close,
+    tenkan: +now.tenkan.toFixed(6), kijun: +now.kijun.toFixed(6),
+    spanA: +now.spanA.toFixed(6), spanB: +now.spanB.toFixed(6),
+    cloudTop: +now.cloudTop.toFixed(6), cloudBot: +now.cloudBot.toFixed(6),
+    pricePos: now.pricePos, cloudBullish: now.cloudBullish,
+    futureBullish: now.futureBullish, chikou: now.chikouClear,
+    trendScore,
+    trend: trendScore >= 25 ? 'STRONG_BULL' : trendScore >= 10 ? 'BULL' : trendScore <= -25 ? 'STRONG_BEAR' : trendScore <= -10 ? 'BEAR' : 'NEUTRAL',
+    setups,
+    updated: new Date().toISOString(),
+  };
+  state.analysis[`${coin}:${tf}`] = analysis;
+  return analysis;
 }
-setInterval(() => {
-  const snap = { t: Date.now(), perAgent: {} };
-  Object.entries(state.live).forEach(([id, a]) => {
-    snap.perAgent[id] = { alerts: a.alertsInWindow, events: a.eventsInWindow, stats: a.stats || null };
-    a.alertsInWindow = 0; a.eventsInWindow = 0;   // window reset
+
+function fireSignals(a) {
+  a.setups.forEach(s => {
+    state.signalCount++;
+    const urgency = s.weight >= 50 ? 'HIGH' : s.weight >= 30 ? 'MEDIUM' : 'LOW';
+    const signal = {
+      source_agent: 'KAISEN-01_Ichimoku',
+      asset: a.coin,
+      timeframe: a.tf.toUpperCase(),
+      signal: s.type,
+      direction: s.dir,
+      urgency,
+      metrics: {
+        current_price: a.price,
+        kijun_support: a.kijun,
+        cloud_top: a.cloudTop,
+        cloud_bottom: a.cloudBot,
+        trend: a.trend,
+        trend_score: a.trendScore,
+        ...(s.target ? { edge_target: +s.target.toFixed(6) } : {}),
+      },
+      generated: new Date().toISOString(),
+    };
+    state.signals.unshift(signal);
+    if (state.signals.length > 100) state.signals.pop();
+    emit('SIGNAL', 'keisen.signal', signal, urgency === 'HIGH' ? 'HIGH' : 'INFO');
   });
-  state.history.push(snap);
-  state.history = state.history.slice(-168);      // 7 days of hourly memory
-}, SNAPSHOT_MS);
-
-// ─── Propose: the kaizen cycle ────────────────────────────────────────────────
-function trendSummary() {
-  const byAgent = {};
-  state.history.slice(-48).forEach(s => Object.entries(s.perAgent).forEach(([id, m]) => {
-    const b = byAgent[id] || { alerts: 0, events: 0, hours: 0 };
-    b.alerts += m.alerts; b.events += m.events; b.hours++;
-    byAgent[id] = b;
-  }));
-  return Object.entries(byAgent).map(([id, b]) => ({
-    agent: id, hoursObserved: b.hours,
-    alertsPerDay: b.hours ? +((b.alerts / b.hours) * 24).toFixed(1) : 0,
-    eventsPerHour: b.hours ? +(b.events / b.hours).toFixed(1) : 0,
-    latestStats: state.live[id]?.stats || null,
-    minutesSinceSeen: state.live[id]?.lastSeen ? Math.round((Date.now() - state.live[id].lastSeen) / 60000) : null,
-  }));
 }
 
-// Surfaces recurring contrarian-thesis tags across recent Vizier memos so KAIZEN can catch
-// "same bet, different ticker" patterns that MATRIX's price-correlation clustering misses.
-function thesisClusterSummary() {
-  const byTag = {};
-  state.vizierEchoes.forEach(e => {
-    if (!e.thesisTag) return;
-    const b = byTag[e.thesisTag] || { occurrences: 0, assets: [] };
-    b.occurrences++;
-    if (!b.assets.includes(e.asset)) b.assets.push(e.asset);
-    byTag[e.thesisTag] = b;
+// ─── Hyperliquid Candle Fetch ─────────────────────────────────────────────────
+async function fetchCandles(coin, interval) {
+  const lookbackMs = interval === '4h' ? 120 * 4 * 3600e3 : 120 * 3600e3;
+  const body = { type: 'candleSnapshot', req: { coin, interval, startTime: Date.now() - lookbackMs, endTime: Date.now() } };
+  const res = await fetch(HL_API, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body), timeout: 15000,
   });
-  return byTag;
+  if (!res.ok) throw new Error(`Hyperliquid ${res.status} for ${coin} ${interval}`);
+  const raw = await res.json();
+  if (!Array.isArray(raw)) throw new Error(`Unexpected response for ${coin}`);
+  return raw.map(k => ({ t: k.t, o: +k.o, h: +k.h, l: +k.l, c: +k.c, v: +k.v }));
 }
 
-async function kaizenCycle() {
-  if (!ANTHROPIC_API_KEY) { reportError('ANTHROPIC_API_KEY not set — observation-only mode'); return; }
-  if (state.running) return;
-  state.running = true;
-  state.cycleCount++;
-  emit('SYS', 'kaizen.cycle.start', { cycle: state.cycleCount, model: ANTHROPIC_MODEL });
-  try {
-    const openTasks = state.tasks.filter(t => t.status === 'PROPOSED' || t.status === 'ACCEPTED').map(t => ({ id: t.id, target: t.target, title: t.title, status: t.status }));
-    const doneRecent = state.tasks.filter(t => t.status === 'DEPLOYED').slice(0, 8).map(t => ({ id: t.id, target: t.target, title: t.title, deployedAt: t.deployedAt, impactNote: t.impactNote || 'pending measurement' }));
-    const prompt = `You are KAIZEN-01, the continuous-improvement engine of a 22-agent autonomous crypto trading network (pre-live, paper-trading stage next). Your philosophy: many small, measurable improvements. You PROPOSE; humans deploy.
+// ─── Hyperliquid Universe Discovery (ASSETS=ALL mode) ────────────────────────
+async function fetchUniverse() {
+  const res = await fetch(HL_API, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'metaAndAssetCtxs' }), timeout: 15000,
+  });
+  if (!res.ok) throw new Error(`Hyperliquid universe ${res.status}`);
+  const [meta, ctxs] = await res.json();
+  const ranked = meta.universe
+    .map((u, i) => ({ name: u.name, vol: parseFloat(ctxs[i]?.dayNtlVlm || 0), delisted: !!u.isDelisted }))
+    .filter(u => !u.delisted && u.vol > 0)
+    .sort((a, b) => b.vol - a.vol)
+    .slice(0, MAX_ASSETS)
+    .map(u => u.name);
+  return ranked;
+}
 
-48-HOUR TREND SUMMARY PER AGENT (from your own hourly memory):
-${JSON.stringify(trendSummary(), null, 1)}
-
-COUNCIL ECHOES — recent AUDITOR grades: ${JSON.stringify(state.auditEchoes.slice(0, 5))}
-Recent VIZIER memos (asset, direction, verdict, reason, thesisTag): ${JSON.stringify(state.vizierEchoes.slice(0, 12))}
-THESIS-CLUSTER COUNTS — same underlying directional bet expressed across DIFFERENT assets, tagged
-at execution (occurrences ≥3 across ≥2 assets means the price-correlation cluster cap is being
-bypassed by a thesis that isn't price-correlated): ${JSON.stringify(thesisClusterSummary())}
-
-CURRENTLY OPEN TASKS (do NOT duplicate these):
-${JSON.stringify(openTasks, null, 1)}
-
-RECENTLY DEPLOYED (assess impact if trends allow):
-${JSON.stringify(doneRecent, null, 1)}
-
-If THESIS-CLUSTER COUNTS shows any tag with occurrences ≥3 across ≥2 assets, treat that as strong,
-already-evidenced signal worth a task on its own — even if per-agent alert rates look otherwise normal.
-
-Propose 1-4 NEW improvement tasks. Quality over quantity — an empty list is acceptable if nothing genuine emerges. Prefer ENV_VAR remedies (tunable without code). Return ONLY JSON, no fences:
-{
- "impactAssessments": [{"taskId": <id>, "assessment": "<did the deployed task measurably help? max 20 words>"}],
- "tasks": [{
-   "target": "<agent id or NETWORK>",
-   "category": "THRESHOLD_TUNING|DATA_QUALITY|NEW_CAPABILITY|BUG_SUSPECT|PROCESS",
-   "title": "<max 12 words>",
-   "rationale": "<what the telemetry shows — max 30 words, cite numbers>",
-   "remedy": "<EXACT change: env var name + new value, or precise code change description — max 30 words>",
-   "expectedImpact": "<measurable outcome — max 15 words>",
-   "priority": "P1|P2|P3",
-   "effort": "ENV_VAR|SMALL_PATCH|NEW_MODULE"
- }]
-}`;
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 1800, messages: [{ role: 'user', content: prompt }] }),
-      timeout: 60000,
-    });
-    if (!res.ok) throw new Error(`Anthropic ${res.status}`);
-    const j = await res.json();
-    const text = (j.content || []).map(c => c.text || '').join('').trim();
-    const out = extractJson(text);
-    // Impact assessments close the loop on deployed tasks
-    (out.impactAssessments || []).forEach(ia => {
-      const t = state.tasks.find(x => x.id === ia.taskId);
-      if (t) { t.impactNote = ia.assessment; t.status = 'MEASURED'; emit('SYS', 'kaizen.impact', { id: t.id, target: t.target, assessment: ia.assessment }); }
-    });
-    // New tasks join the backlog and are DELIVERED on the bus
-    (out.tasks || []).slice(0, 4).forEach(nt => {
-      state.taskSeq++;
-      const task = { id: state.taskSeq, ...nt, status: 'PROPOSED', createdAt: new Date().toISOString() };
-      state.tasks.unshift(task);
-      emit('TASK', 'kaizen.task', task);
-      if (task.priority === 'P1') {
-        state.alertCount++;
-        emit('ALERT', 'kaizen.alert', { type: 'KAIZEN_P1', asset: task.target, message: task.title, recommendation: task.remedy }, 'HIGH');
+async function scanAll() {
+  state.scanCount++;
+  if (ALL_MODE) {
+    try {
+      ASSETS = await fetchUniverse();
+      emit('SYS', 'keisen.universe', { mode: 'ALL', topByVolume: ASSETS.length, sample: ASSETS.slice(0, 10) });
+    } catch (err) {
+      emit('SYS', 'keisen.universe', { mode: 'ALL', error: err.message, usingPrevious: ASSETS.length });
+      if (!ASSETS.length) return;
+    }
+  }
+  emit('SYS', 'keisen.scan.start', { scan: state.scanCount, assets: ASSETS.length, timeframes: TIMEFRAMES });
+  let ok = 0, failed = 0;
+  for (const coin of ASSETS) {
+    for (const tf of TIMEFRAMES) {
+      try {
+        const candles = await fetchCandles(coin, tf);
+        if (candles.length < 80) { failed++; continue; }
+        state.candles[`${coin}:${tf}`] = candles;
+        const a = screen(coin, tf, candles);
+        if (a) { ok++; emit('SCAN', 'keisen.analysis', a); fireSignals(a); }
+        await new Promise(r => setTimeout(r, SCAN_PACING_MS));
+      } catch (err) {
+        failed++;
+        state.errors.push({ time: new Date().toISOString(), coin, tf, message: err.message });
+        state.errors = state.errors.slice(-15);
       }
-    });
-    state.tasks = state.tasks.slice(0, 60);
-    emit('SYS', 'kaizen.cycle.complete', { cycle: state.cycleCount, newTasks: (out.tasks || []).length, assessed: (out.impactAssessments || []).length, backlog: state.tasks.filter(t => t.status === 'PROPOSED' || t.status === 'ACCEPTED').length });
-  } catch (err) { reportError('Cycle: ' + err.message); }
-  state.running = false;
+    }
+  }
+  emit('SYS', 'keisen.scan.complete', { scan: state.scanCount, analyzed: ok, failed, signalsTotal: state.signalCount });
 }
 
-function setTaskStatus(id, status) {
-  const t = state.tasks.find(x => x.id === id);
-  if (!t) return null;
-  t.status = status;
-  if (status === 'DEPLOYED') t.deployedAt = new Date().toISOString();
-  emit('TASK', 'kaizen.task.update', { id: t.id, status: t.status, target: t.target, title: t.title });
-  return t;
-}
-
-// ─── App / Bus / GECKO ────────────────────────────────────────────────────────
-const app = express(); app.use(cors()); app.use(express.json());
+// ─── App Setup ───────────────────────────────────────────────────────────────
+const app = express();
+app.use(cors());
+app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
-function broadcast(e){const p=JSON.stringify({...e,agentId:'KAIZEN-01',timestamp:new Date().toISOString()});wss.clients.forEach(c=>{if(c.readyState===WebSocket.OPEN)c.send(p);});}
-function emit(type,topic,data,severity='INFO'){broadcast({type,topic,data,severity});console.log(`[${new Date().toISOString()}] [${type}] [${topic}] ${JSON.stringify(data).substring(0,130)}`);}
-let geckoWs=null;
-function connectGecko(){geckoWs=new WebSocket(GECKO_URL);
-  geckoWs.on('open',()=>{state.geckoConnected=true;emit('SYS','kaizen.gecko.connected',{});});
-  geckoWs.on('close',()=>{state.geckoConnected=false;setTimeout(connectGecko,5000);});
-  geckoWs.on('error',()=>{});
-  geckoWs.on('message',raw=>{try{ingest(JSON.parse(raw.toString()));}catch(e){}});}
-connectGecko();
-setInterval(()=>{if(geckoWs?.readyState===WebSocket.OPEN){geckoWs.send(JSON.stringify({type:'PING'}));
-  const open=state.tasks.filter(t=>t.status==='PROPOSED'||t.status==='ACCEPTED').length;
-  geckoWs.send(JSON.stringify({type:'STATUS',agentId:'KAIZEN-01',stats:{tasks:state.taskSeq,open,mode:ANTHROPIC_API_KEY?'improving':'no-key'}}));}},15000);
-wss.on('connection',ws=>{
-  ws.send(JSON.stringify({type:'SYS',topic:'kaizen.handshake',agentId:'KAIZEN-01',timestamp:new Date().toISOString(),
-    data:{geckoConnected:state.geckoConnected,scoringEnabled:!!ANTHROPIC_API_KEY,model:ANTHROPIC_MODEL,
-      tasks:state.tasks.slice(0,30),agentsHeard:Object.keys(state.live).length,historyHours:state.history.length,
-      stats:{uptime:Date.now()-state.startTime,cycles:state.cycleCount,taskTotal:state.taskSeq}}}));
-  ws.on('message',raw=>{try{const m=JSON.parse(raw.toString());
-    if(m.type==='PING')ws.send(JSON.stringify({type:'PONG',agentId:'KAIZEN-01'}));
-    if(m.type==='CYCLE')kaizenCycle();
-    if(m.type==='TASK_STATUS'&&m.id&&m.status)setTaskStatus(m.id,m.status);
-  }catch(e){}});});
-app.get('/health',(_,res)=>res.json({agent:'KAIZEN-01',status:'LIVE',geckoConnected:state.geckoConnected,
-  scoringEnabled:!!ANTHROPIC_API_KEY,uptime:Date.now()-state.startTime,cycles:state.cycleCount,
-  taskTotal:state.taskSeq,openTasks:state.tasks.filter(t=>t.status==='PROPOSED'||t.status==='ACCEPTED').length,
-  agentsHeard:Object.keys(state.live).length,historyHours:state.history.length,errors:state.errors.slice(-3)}));
-app.get('/backlog',(_,res)=>res.json({agent:'KAIZEN-01',tasks:state.tasks}));
-app.get('/trends',(_,res)=>res.json({agent:'KAIZEN-01',trends:trendSummary(),historyHours:state.history.length}));
-app.post('/cycle',(_,res)=>{kaizenCycle();res.json({ok:true});});
-app.post('/task/:id/:status',(req,res)=>{
-  const t=setTaskStatus(parseInt(req.params.id),req.params.status.toUpperCase());
-  if(!t)return res.status(404).json({error:'task not found'});
-  res.json(t);});
-server.listen(PORT,()=>{
-  console.log('\n╔════════════════════════════════════════════════╗');
-  console.log('║   KAIZEN-01 — 改善 Continuous Improvement       ║');
-  console.log('║   observe → propose → deliver → measure        ║');
-  console.log('╚════════════════════════════════════════════════╝\n');
-  console.log(`  HTTP →  http://localhost:${PORT}  ·  /backlog /trends`);
-  console.log(`  Loop →  every ${KAIZEN_INTERVAL_MS/3600000}h · memory 7 days · ${ANTHROPIC_API_KEY?ANTHROPIC_MODEL:'⚠ NO KEY'}`);
-  console.log(`  Law  →  Kaizen proposes, humans deploy\n`);
-  setTimeout(kaizenCycle, FIRST_CYCLE_DELAY_MS);
-  setInterval(kaizenCycle, KAIZEN_INTERVAL_MS);
+
+function broadcast(event) {
+  const payload = JSON.stringify({ ...event, agentId: 'KAISEN-01', timestamp: new Date().toISOString() });
+  wss.clients.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(payload); });
+}
+function emit(type, topic, data, severity = 'INFO') {
+  broadcast({ type, topic, data, severity });
+  console.log(`[${new Date().toISOString()}] [${type}] [${topic}] ${JSON.stringify(data).substring(0, 120)}`);
+}
+
+// ─── TradingView Webhook Receiver ────────────────────────────────────────────
+app.post('/webhook', (req, res) => {
+  if (WEBHOOK_SECRET && req.body?.secret !== WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Invalid webhook secret' });
+  }
+  state.webhookCount++;
+  const w = req.body || {};
+  const signal = {
+    source_agent: 'KAISEN-01_TradingView',
+    asset: w.asset || w.ticker || 'UNKNOWN',
+    timeframe: (w.timeframe || w.interval || '—').toString().toUpperCase(),
+    signal: w.signal || w.alert || 'TV_ALERT',
+    direction: (w.direction || w.side || 'NEUTRAL').toString().toUpperCase(),
+    urgency: (w.urgency || 'MEDIUM').toString().toUpperCase(),
+    metrics: w.metrics || { current_price: w.price || null },
+    generated: new Date().toISOString(),
+  };
+  state.signals.unshift(signal);
+  if (state.signals.length > 100) state.signals.pop();
+  emit('WEBHOOK', 'keisen.webhook', signal, 'INFO');
+  res.json({ ok: true, received: signal });
 });
-process.on('SIGTERM',()=>process.exit(0)); process.on('SIGINT',()=>process.exit(0));
+
+// ─── GECKO-01 Network Link ────────────────────────────────────────────────────
+let geckoWs = null;
+function connectGecko() {
+  console.log(`Connecting to GECKO-01 at ${GECKO_URL}...`);
+  geckoWs = new WebSocket(GECKO_URL);
+  geckoWs.on('open', () => { state.geckoConnected = true; emit('SYS', 'keisen.gecko.connected', { url: GECKO_URL }); });
+  geckoWs.on('close', () => { state.geckoConnected = false; emit('SYS', 'keisen.gecko.disconnected', {}); setTimeout(connectGecko, 5000); });
+  geckoWs.on('error', () => {});
+  geckoWs.on('message', () => {});
+}
+connectGecko();
+setInterval(() => {
+  if (geckoWs?.readyState === WebSocket.OPEN) {
+    geckoWs.send(JSON.stringify({ type: 'PING' }));
+    geckoWs.send(JSON.stringify({
+      type: 'STATUS', agentId: 'KAISEN-01',
+      stats: { signals: state.signalCount, scans: state.scanCount, mode: 'active' },
+    }));
+  }
+}, 15000);
+
+// ─── Dashboard WebSocket ──────────────────────────────────────────────────────
+wss.on('connection', ws => {
+  ws.send(JSON.stringify({
+    type: 'SYS', topic: 'keisen.handshake', agentId: 'KAISEN-01', timestamp: new Date().toISOString(),
+    data: {
+      message: 'Connected to KAISEN-01 Ichimoku screener',
+      geckoConnected: state.geckoConnected,
+      assets: ASSETS, timeframes: TIMEFRAMES,
+      analysis: state.analysis,
+      signals: state.signals.slice(0, 30),
+      stats: { uptime: Date.now() - state.startTime, scans: state.scanCount, signals: state.signalCount, webhooks: state.webhookCount },
+    },
+  }));
+  ws.on('message', raw => {
+    try {
+      const m = JSON.parse(raw.toString());
+      if (m.type === 'PING') ws.send(JSON.stringify({ type: 'PONG', agentId: 'KAISEN-01' }));
+      if (m.type === 'SCAN') scanAll();
+    } catch (e) {}
+  });
+});
+
+// ─── REST API ─────────────────────────────────────────────────────────────────
+app.get('/health', (_, res) => res.json({
+  agent: 'KAISEN-01', status: 'LIVE', geckoConnected: state.geckoConnected,
+  uptime: Date.now() - state.startTime, scans: state.scanCount,
+  signals: state.signalCount, webhooks: state.webhookCount,
+  assets: ASSETS, timeframes: TIMEFRAMES, errors: state.errors.slice(-3),
+}));
+app.get('/signals', (_, res) => res.json({ agent: 'KAISEN-01', count: state.signalCount, signals: state.signals }));
+app.get('/analysis', (_, res) => res.json({ agent: 'KAISEN-01', timestamp: new Date().toISOString(), analysis: state.analysis }));
+app.get('/analysis/:coin', (req, res) => {
+  const out = {};
+  TIMEFRAMES.forEach(tf => { const a = state.analysis[`${req.params.coin.toUpperCase()}:${tf}`]; if (a) out[tf] = a; });
+  if (!Object.keys(out).length) return res.status(404).json({ error: 'No analysis for coin' });
+  res.json(out);
+});
+app.post('/scan', (_, res) => { scanAll(); res.json({ ok: true, message: 'Scan started' }); });
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+server.listen(PORT, () => {
+  console.log('');
+  console.log('╔════════════════════════════════════════════════╗');
+  console.log('║     KAISEN-01 Ichimoku Screener Agent          ║');
+  console.log('║     Venue: Hyperliquid · Multi-timeframe       ║');
+  console.log('╚════════════════════════════════════════════════╝');
+  console.log('');
+  console.log(`  HTTP    →  http://localhost:${PORT}`);
+  console.log(ALL_MODE ? `  Assets  →  ALL (top ${MAX_ASSETS} by 24h volume, auto-discovered)` : `  Assets  →  ${ASSETS.join(', ')}`);
+  console.log(`  Scan    →  every ${SCAN_INTERVAL_MS / 60000} min`);
+  console.log(`  Webhook →  POST /webhook (TradingView)`);
+  console.log('');
+  scanAll();
+  setInterval(scanAll, SCAN_INTERVAL_MS);
+});
+
+process.on('SIGTERM', () => { console.log('KAISEN-01 shutting down...'); process.exit(0); });
+process.on('SIGINT',  () => { console.log('KAISEN-01 shutting down...'); process.exit(0); });
